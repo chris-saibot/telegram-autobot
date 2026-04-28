@@ -14,6 +14,10 @@ SESSION_STRING = os.environ["SESSION_STRING"]
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 ai = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
+# 💕 Номер девушки
+GIRLFRIEND_PHONE = "+998901227646"
+girlfriend_id = None  # будет заполнено при старте
+
 # 🎭 Разные анимации
 ANIMATIONS = [
     ["🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘", "🌑"],
@@ -24,97 +28,150 @@ ANIMATIONS = [
     ["🌍", "🌎", "🌏", "🌍", "🌐"],
 ]
 
-# ⏰ Смешные ответы по времени суток (UTC+5 — Ташкент)
+# 💕 Анимации для девушки
+GIRLFRIEND_ANIMATIONS = [
+    ["🤍", "🩷", "❤️", "🩷", "🤍"],
+    ["💫", "✨", "💕", "✨", "💫"],
+    ["🌹", "🌸", "🌺", "🌸", "🌹"],
+]
+
 FUNNY_MORNING = [
-    "☀️ Хозяин ещё не проснулся, звони в дверь громче!",
-    "🥱 Слишком рано... он спит как медведь",
-    "☕ Без кофе не отвечает. Я пробовал.",
+    "☀️ ещё сплю, позже",
+    "🥱 рано ещё. ок?",
+    "☕ без кофе не отвечаю",
 ]
-
 FUNNY_DAY = [
-    "🏃 Убежал куда-то, вернётся скоро!",
-    "🎮 Скорее всего играет и делает вид что не видит",
-    "📵 Телефон в кармане, карман в штанах, штаны где-то там",
-    "🌀 Завис как Windows 98, перезагрузка скоро",
+    "📵 занят, позже",
+    "🏃 не в сети, ок",
+    "🎮 ладно, напишу потом",
+    "🌀 понял, скоро буду",
 ]
-
 FUNNY_EVENING = [
-    "🌆 Ужинает, мешать не советую",
-    "📺 Смотрит сериал и притворяется занятым",
-    "🛋️ Лежит на диване в режиме 'не трогать'",
+    "🌆 отдыхаю, позже напишу",
+    "📺 ладно, понял",
+    "🛋️ не в сети сейчас",
 ]
-
 FUNNY_NIGHT = [
-    "🌙 Спит без задних ног... или не спит 👀",
-    "👻 Тссс... ночь. Тут водятся призраки 👻💀",
-    "🦇 В этот час хозяин превращается в летучую мышь",
-    "😈 3 часа ночи... ты уверен что хочешь писать?",
-    "🌑 Темно. Тихо. Хозяин исчез в ночи...",
+    "🌙 сплю. ок?",
+    "👻 ночь уже...",
+    "😴 понял, завтра отвечу",
 ]
 
-def get_time_mood():
-    """Возвращает время суток по Ташкенту (UTC+5)"""
-    hour = (datetime.utcnow().hour + 5) % 24
-    if 6 <= hour < 11:
-        return "morning", random.choice(FUNNY_MORNING)
-    elif 11 <= hour < 18:
-        return "day", random.choice(FUNNY_DAY)
-    elif 18 <= hour < 23:
-        return "evening", random.choice(FUNNY_EVENING)
-    else:
-        return "night", random.choice(FUNNY_NIGHT)
+# 💕 Ответы для девушки
+GF_MORNING = [
+    "доброе утро солнышко ☀️❤️ сплю ещё, скоро напишу",
+    "привет моя хорошая 🌸 только проснулся, скучаю",
+]
+GF_DAY = [
+    "привет любимая ❤️ занят сейчас, но думаю о тебе",
+    "солнышко 🌹 не в сети, скоро вернусь. скучаю",
+    "привет 💕 занят немного, напишу как освобожусь",
+]
+GF_EVENING = [
+    "привет моя хорошая 🌸 скоро буду, скучаю по тебе ❤️",
+    "солнышко 💕 отдыхаю, напишу чуть позже. люблю",
+]
+GF_NIGHT = [
+    "сплю уже 😴❤️ спокойной ночи моя хорошая",
+    "ночь уже 🌙 ложись спать, напишу утром. люблю 💕",
+    "засыпаю 😴 спокойной ночи солнышко ❤️",
+]
 
-def get_system_prompt(time_of_day):
-    """Системный промпт зависит от времени"""
-    base = "Ты автоответчик пользователя Telegram. Отвечай коротко, по-дружески, как живой человек."
-    if time_of_day == "night":
-        return base + " Сейчас ночь — отвечай таинственно и немного страшно, используй 👻🌑💀. Намекни что хозяин может и не спать..."
-    elif time_of_day == "morning":
-        return base + " Сейчас утро — хозяин только просыпается, отвечай сонно и лениво 😴☕"
-    elif time_of_day == "evening":
-        return base + " Сейчас вечер — хозяин отдыхает, отвечай расслабленно 🌆"
+def get_time_mood(is_girlfriend=False):
+    hour = (datetime.utcnow().hour + 5) % 24
+    if is_girlfriend:
+        if 6 <= hour < 11:
+            return "morning", random.choice(GF_MORNING)
+        elif 11 <= hour < 18:
+            return "day", random.choice(GF_DAY)
+        elif 18 <= hour < 23:
+            return "evening", random.choice(GF_EVENING)
+        else:
+            return "night", random.choice(GF_NIGHT)
     else:
-        return base + " Хозяин занят днём, отвечай бодро и с юмором 😄"
+        if 6 <= hour < 11:
+            return "morning", random.choice(FUNNY_MORNING)
+        elif 11 <= hour < 18:
+            return "day", random.choice(FUNNY_DAY)
+        elif 18 <= hour < 23:
+            return "evening", random.choice(FUNNY_EVENING)
+        else:
+            return "night", random.choice(FUNNY_NIGHT)
+
+def get_system_prompt(time_of_day, is_girlfriend=False):
+    if is_girlfriend:
+        base = """Ты — автоответчик парня в Telegram. Пишешь его девушке.
+
+СТИЛЬ (очень важно):
+- Нежно, тепло, с любовью
+- Коротко — 1-2 предложения
+- Используй: солнышко, любимая, моя хорошая
+- Добавляй сердечки: ❤️ 💕 🌹 🌸
+- Скажи что не в сети но думаешь о ней
+- Пиши без заглавных букв как в чате"""
+        if time_of_day == "night":
+            base += "\n- Ночь — пожелай спокойной ночи нежно"
+        return base
+    else:
+        base = """Ты — автоответчик в Telegram.
+- Пиши коротко, 1-2 предложения
+- Без заглавных букв
+- Слова: ок, ладно, понял
+- Скажи что не в сети"""
+        if time_of_day == "night":
+            base += "\n- Ночь, добавь 🌙"
+        return base
 
 @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
 async def handler(event):
     if not event.raw_text or event.raw_text.strip() == "":
         return
 
-    # Случайная анимация
-    animation = random.choice(ANIMATIONS)
+    # Проверяем — девушка ли пишет
+    is_girlfriend = (girlfriend_id is not None and event.sender_id == girlfriend_id)
+
+    # Выбираем анимацию
+    if is_girlfriend:
+        animation = random.choice(GIRLFRIEND_ANIMATIONS)
+    else:
+        animation = random.choice(ANIMATIONS)
+
     msg = await event.respond(animation[0])
     for frame in animation[1:]:
         await asyncio.sleep(0.4)
         await msg.edit(frame)
 
-    # Определяем время суток
-    time_of_day, funny_reply = get_time_mood()
+    time_of_day, auto_reply = get_time_mood(is_girlfriend)
 
-    # 30% шанс — смешной автоответ без ИИ
-    if random.random() < 0.3:
-        await asyncio.sleep(0.5)
-        await msg.edit(funny_reply)
+    # Для девушки всегда ИИ, для остальных 25% авто
+    if not is_girlfriend and random.random() < 0.25:
+        await asyncio.sleep(0.3)
+        await msg.edit(auto_reply)
         return
 
-    # 70% — ИИ отвечает с учётом времени
     try:
         response = ai.messages.create(
             model="claude-sonnet-4-20250514",
-            max_tokens=300,
-            system=get_system_prompt(time_of_day),
+            max_tokens=100,
+            system=get_system_prompt(time_of_day, is_girlfriend),
             messages=[{"role": "user", "content": event.raw_text}]
         )
-        final = response.content[0].text
-        # Иногда добавляем смешной комментарий в конце
-        if random.random() < 0.4:
-            final += f"\n\n{funny_reply}"
-        await msg.edit(final)
-    except Exception as e:
-        await msg.edit(funny_reply)
+        await msg.edit(response.content[0].text)
+    except Exception:
+        await msg.edit(auto_reply)
 
 async def main():
+    global girlfriend_id
     await client.start()
+
+    # Находим ID девушки по номеру
+    try:
+        gf = await client.get_entity(GIRLFRIEND_PHONE)
+        girlfriend_id = gf.id
+        print(f"Девушка найдена ✅ ID: {girlfriend_id}")
+    except Exception as e:
+        print(f"Девушка не найдена ❌ {e}")
+
     print("Бот запущен! ✅")
     await client.run_until_disconnected()
 
