@@ -4,6 +4,7 @@ import random
 from datetime import datetime
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
+from telethon.tl.types import UserStatusOnline
 import anthropic
 
 API_ID = int(os.environ["API_ID"])
@@ -16,16 +17,14 @@ ai = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 # 💕 Номер девушки
 GIRLFRIEND_PHONE = "+998901227646"
-girlfriend_id = None  # будет заполнено при старте
+girlfriend_id = None
 
-# 🎭 Разные анимации
+# 🎭 Анимации для всех
 ANIMATIONS = [
-    ["🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘", "🌑"],
     ["🔥", "🔥🔥", "🔥🔥🔥", "💥", "✨"],
     ["⭐", "🌟", "💫", "✨", "🌠"],
     ["😴", "😴💤", "😴💤💤", "🛌💤", "🤖"],
     ["👻", "👻💀", "💀👻", "👻", "😱"],
-    ["🌍", "🌎", "🌏", "🌍", "🌐"],
 ]
 
 # 💕 Анимации для девушки
@@ -57,7 +56,6 @@ FUNNY_NIGHT = [
     "😴 понял, завтра отвечу",
 ]
 
-# 💕 Ответы для девушки
 GF_MORNING = [
     "доброе утро солнышко ☀️❤️ сплю ещё, скоро напишу",
     "привет моя хорошая 🌸 только проснулся, скучаю",
@@ -78,7 +76,7 @@ GF_NIGHT = [
 ]
 
 def get_time_mood(is_girlfriend=False):
-    hour = (datetime.utcnow().hour + 5) % 24
+    hour = (datetime.now().hour + 5) % 24
     if is_girlfriend:
         if 6 <= hour < 11:
             return "morning", random.choice(GF_MORNING)
@@ -127,10 +125,19 @@ async def handler(event):
     if not event.raw_text or event.raw_text.strip() == "":
         return
 
-    # Проверяем — девушка ли пишет
+    # ✅ Проверяем онлайн ли хозяин — если да, не отвечаем
+    try:
+        me = await client.get_me()
+        my_entity = await client.get_entity(me.id)
+        if isinstance(my_entity.status, UserStatusOnline):
+            return
+    except Exception:
+        pass
+
+    # Девушка или нет
     is_girlfriend = (girlfriend_id is not None and event.sender_id == girlfriend_id)
 
-    # Выбираем анимацию
+    # Анимация
     if is_girlfriend:
         animation = random.choice(GIRLFRIEND_ANIMATIONS)
     else:
@@ -143,12 +150,13 @@ async def handler(event):
 
     time_of_day, auto_reply = get_time_mood(is_girlfriend)
 
-    # Для девушки всегда ИИ, для остальных 25% авто
+    # 25% шанс авто-ответа (только не для девушки)
     if not is_girlfriend and random.random() < 0.25:
         await asyncio.sleep(0.3)
         await msg.edit(auto_reply)
         return
 
+    # ИИ отвечает
     try:
         response = ai.messages.create(
             model="claude-sonnet-4-20250514",
@@ -164,7 +172,7 @@ async def main():
     global girlfriend_id
     await client.start()
 
-    # Находим ID девушки по номеру
+    # Находим ID девушки
     try:
         gf = await client.get_entity(GIRLFRIEND_PHONE)
         girlfriend_id = gf.id
