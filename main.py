@@ -1,5 +1,3 @@
-Content is user-generated and unverified.
-1
 import asyncio
 import os
 import random
