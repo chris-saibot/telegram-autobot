@@ -334,7 +334,7 @@ async def handler_private(event):
 
     try:
         response = ai.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=100,
             system=get_system_prompt(time_of_day, is_girlfriend),
             messages=[{"role": "user", "content": event.raw_text}]
