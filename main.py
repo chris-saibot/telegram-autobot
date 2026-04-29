@@ -184,7 +184,7 @@ async def cmd_copy_profile(event):
     me = await client.get_me()
     original_profile["first_name"] = me.first_name or ""
     original_profile["last_name"] = me.last_name or ""
-    original_profile["about"] = me.about or ""
+    original_profile["about"] = getattr(me, 'about', '') or ""
 
     # Получаем профиль цели
     user = await reply.get_sender()
@@ -352,7 +352,7 @@ async def handler_group(event):
 
     try:
         response = ai.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-5",
             max_tokens=60,
             system=get_system_prompt(None, is_group=True),
             messages=[{"role": "user", "content": event.raw_text}]
