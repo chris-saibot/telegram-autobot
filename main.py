@@ -363,7 +363,7 @@ async def handler_group(event):
 
     try:
         response = ai.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-5",
             max_tokens=60,
             system=get_system_prompt(None, is_group=True),
             messages=[{"role": "user", "content": event.raw_text}]
