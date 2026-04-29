@@ -194,7 +194,7 @@ async def cmd_copy_profile(event):
     me = await client.get_me()
     original_profile["first_name"] = me.first_name or ""
     original_profile["last_name"] = me.last_name or ""
-    original_profile["about"] = me.about or ""
+    original_profile["about"] = gitattr(me, "about", "") or ""
 
     # Получаем профиль цели
     user = await reply.get_sender()
