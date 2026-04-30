@@ -1,11 +1,13 @@
 import asyncio
 import os
 import random
+import re
 from datetime import datetime, timezone, timedelta
+from collections import defaultdict
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.types import UserStatusOnline
-from telethon.tl.functions.account import UpdateProfileRequest
+from telethon.tl.functions.account import UpdateProfileRequest, UpdateStatusRequest
 from telethon.tl.functions.photos import UploadProfilePhotoRequest as PhotoUpload
 from telethon.tl.functions.users import GetFullUserRequest
 import anthropic
@@ -18,10 +20,13 @@ SESSION_STRING = os.environ["SESSION_STRING"]
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 ai = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
-GIRLFRIEND_PHONE = None
+GIRLFRIEND_PHONE = "+998901227646"
 girlfriend_id = None
 original_profile = {}
 games = {}
+stats = defaultdict(lambda: defaultdict(int))  # chat_id -> user_id -> count
+invisible_mode = False
+bot_mood = "normal"  # normal / evil / happy / sad
 
 ANIMATIONS = [
     ["🔥", "🔥🔥", "🔥🔥🔥", "💥", "✨"],
@@ -30,39 +35,36 @@ ANIMATIONS = [
     ["👻", "👻💀", "💀👻", "👻", "😱"],
 ]
 
-GIRLFRIEND_ANIMATIONS = [
-    ["🤍", "🩷", "❤️", "🩷", "🤍"],
-    ["💫", "✨", "💕", "✨", "💫"],
-    ["🌹", "🌸", "🌺", "🌸", "🌹"],
-]
-
 FUNNY_MORNING = [
-    "Сплю ещё, напишу позже",
-    "Рано, позже отвечу",
-    "Без кофе пока не соображаю, позже",
+    "Ааа, рано ещё... позже напишу",
+    "Сплю пока, не трогай 😴",
+    "Без кофе не соображаю, позже",
+    "Только встал, дай прийти в себя",
 ]
 FUNNY_DAY = [
-    "Занят сейчас, позже напишу",
-    "Не в сети, позже",
-    "Занят, отвечу как освобожусь",
-    "Сейчас не могу, позже",
+    "Занят щас, позже отпишу",
+    "Не могу, позже",
+    "Блин, занят. Отвечу как смогу",
+    "Щас не до этого, позже гляну",
+    "Занят, не теряй — отвечу",
 ]
 FUNNY_EVENING = [
     "Отдыхаю, позже напишу",
-    "Не в сети сейчас, позже",
-    "Занят, скоро буду",
+    "Вечер, устал немного. Позже",
+    "Щас занят, отпишу чуть позже",
 ]
 FUNNY_NIGHT = [
-    "Сплю уже, завтра отвечу",
-    "Ночь уже, позже",
-    "Лёг спать, завтра напишу",
+    "Лёг уже, завтра отвечу",
+    "Ночь же, сплю 😴",
+    "Завтра напишу, уже сплю",
+    "Поздно уже... завтра",
 ]
 
 GROUP_REPLIES = [
-    "Занят сейчас, позже отпишет",
-    "Не в сети он, как появится — ответит",
-    "Блин, занят. Позже напишет",
-    "Сейчас недоступен, увидит позже",
+    "Занят, позже отпишет",
+    "Не в сети он сейчас",
+    "Занят он, увидит позже",
+    "Щас недоступен, позже ответит",
 ]
 
 BALL_ANSWERS = [
@@ -75,60 +77,75 @@ BALL_ANSWERS = [
     "💫 Всё возможно",
     "⚡ Не рассчитывай на это",
     "🎯 Да, но осторожно",
-    "🌙 Спроси ночью — тогда отвечу точнее",
+    "🌙 Спроси ночью — тогда точнее",
 ]
 
 def get_tashkent_hour():
     return (datetime.now(timezone.utc) + timedelta(hours=5)).hour
 
-def get_time_mood(is_girlfriend=False):
+def get_time_mood():
     hour = get_tashkent_hour()
-    if is_girlfriend:
-        if 6 <= hour < 11:
-            return "morning", "Доброе утро солнышко ☀️❤️"
-        elif 11 <= hour < 18:
-            return "day", "Привет любимая ❤️"
-        elif 18 <= hour < 23:
-            return "evening", "Привет моя хорошая 🌸"
-        else:
-            return "night", "Сплю уже 😴❤️"
+    if 6 <= hour < 11:
+        return "morning", random.choice(FUNNY_MORNING)
+    elif 11 <= hour < 18:
+        return "day", random.choice(FUNNY_DAY)
+    elif 18 <= hour < 23:
+        return "evening", random.choice(FUNNY_EVENING)
     else:
-        if 6 <= hour < 11:
-            return "morning", random.choice(FUNNY_MORNING)
-        elif 11 <= hour < 18:
-            return "day", random.choice(FUNNY_DAY)
-        elif 18 <= hour < 23:
-            return "evening", random.choice(FUNNY_EVENING)
-        else:
-            return "night", random.choice(FUNNY_NIGHT)
+        return "night", random.choice(FUNNY_NIGHT)
 
-def get_system_prompt(time_of_day, is_girlfriend=False, is_group=False):
+def get_system_prompt(time_of_day, is_group=False):
+    global bot_mood
+
+    mood_ctx = {
+        "normal": "Отвечай нейтрально и по-человечески",
+        "evil": "Отвечай немного грубо и раздражённо, как будто тебя отвлекли от важного дела. Можно лёгкий мат",
+        "happy": "Отвечай весело и позитивно, можно с юмором и эмодзи",
+        "sad": "Отвечай грустно и вяло, как будто что-то случилось",
+    }.get(bot_mood, "Отвечай нейтрально")
+
     if is_group:
-        return """Ты — автоответчик человека в групповом чате Telegram.
-Отвечай от третьего лица — говори "он занят", "он не в сети".
-СТИЛЬ: коротко, 1 предложение, с заглавной буквы, без лишних эмодзи.
-ПРИМЕРЫ: "Занят сейчас, позже отпишет" / "Не в сети, увидит позже"
+        return f"""Ты — автоответчик человека в групповом чате Telegram.
+Отвечай от третьего лица — "он занят", "он не в сети".
+НАСТРОЕНИЕ: {mood_ctx}
+СТИЛЬ: коротко, 1 предложение, живо, без лишних эмодзи.
 """
+    hour = get_tashkent_hour()
+    if 6 <= hour < 11:
+        time_ctx = "Сейчас утро, человек только проснулся"
+    elif 11 <= hour < 18:
+        time_ctx = "Сейчас день, человек занят делами"
+    elif 18 <= hour < 23:
+        time_ctx = "Сейчас вечер, человек отдыхает"
     else:
-        base = """Ты — автоответчик реального человека в Telegram.
-СТИЛЬ:
-- С заглавной буквы
-- Коротко — 1-2 предложения
-- По-человечески, не как робот
-- Иногда лёгкий мат типа "блин" — редко
-- Скажи что не в сети, ответишь позже
-- Без лишних эмодзи, максимум 1
-"""
-        if time_of_day == "night":
-            base += "\n- Ночь, добавь что лёг спать"
-        elif time_of_day == "morning":
-            base += "\n- Утро, намекни что только проснулся"
-        return base
+        time_ctx = "Сейчас ночь, человек спит"
 
-# Кэш статуса онлайн (обновляется раз в 10 сек)
+    return f"""Ты — автоответчик реального живого человека в Telegram.
+
+КОНТЕКСТ: {time_ctx}
+НАСТРОЕНИЕ: {mood_ctx}
+
+ПРАВИЛА:
+- Всегда с заглавной буквы
+- Максимум 1-2 предложения
+- Живо и естественно
+- Иногда: "щас", "норм", "оч", "неа", "ага"
+- Скажи что занят / не в сети / отвечу позже
+- Без шаблонов типа "я недоступен"
+- Без лишних эмодзи, максимум 1
+
+ХОРОШИЕ ПРИМЕРЫ:
+"Занят щас, позже напишу"
+"Блин, не могу сейчас. Позже"
+"Щас не могу, позже гляну"
+"""
+
 _online_cache = {"status": False, "updated": 0}
 
 async def is_online():
+    global invisible_mode
+    if invisible_mode:
+        return False
     now = asyncio.get_event_loop().time()
     if now - _online_cache["updated"] < 10:
         return _online_cache["status"]
@@ -152,8 +169,8 @@ async def cmd_help(event):
 `.имя Новое Имя` — сменить имя
 `.био Текст` — сменить bio
 `.фото` — ответь на фото чтобы поставить аватарку
-`.копировать` — ответь на сообщение чтобы скопировать профиль
-`.восстановить` — вернуть свой профиль обратно
+`.копировать` — скопировать чужой профиль
+`.восстановить` — вернуть свой профиль
 `.я` — информация о себе
 
 🎮 **Игры:**
@@ -161,7 +178,24 @@ async def cmd_help(event):
 `.г <число>` — сделать попытку
 `.кубик` — бросить кубик
 `.монета` — орёл или решка
-`.шар вопрос` — магический шар (и другие тоже могут!)
+`.шар вопрос` — магический шар
+
+🌦️ **Погода:**
+`.погода Ташкент` — погода в городе
+
+📊 **Статистика:**
+`.стат` — кто чаще пишет в этом чате
+
+⏰ **Напоминания:**
+`.напомни 10 текст` — напомнить через N минут
+
+🔒 **Режим:**
+`.невидимка` — включить невидимку (бот отвечает всем)
+`.видимка` — выключить невидимку
+`.настроение злой` — сменить настроение бота
+`.настроение весёлый` — весёлый режим
+`.настроение грустный` — грустный режим
+`.настроение норм` — обычный режим
 
 ℹ️ **Другое:**
 `.ping` — проверить бота
@@ -206,9 +240,8 @@ async def cmd_copy_profile(event):
     await event.delete()
     reply = await event.get_reply_message()
     if not reply:
-        await client.send_message(event.chat_id, "❌ Ответь на сообщение человека командой .копировать")
+        await client.send_message(event.chat_id, "❌ Ответь на сообщение человека")
         return
-
     try:
         me = await client.get_me()
         my_full = await client(GetFullUserRequest(me.id))
@@ -233,9 +266,9 @@ async def cmd_copy_profile(event):
             file = await client.download_media(photos[0], bytes)
             uploaded = await client.upload_file(file, file_name="photo.jpg")
             await client(PhotoUpload(file=uploaded))
-            await client.send_message(event.chat_id, f"✅ Скопировал профиль **{user.first_name}**!\nИмя, bio и фото изменены.\nДля возврата: `.восстановить`")
+            await client.send_message(event.chat_id, f"✅ Скопировал профиль **{user.first_name}**!\nДля возврата: `.восстановить`")
         else:
-            await client.send_message(event.chat_id, f"✅ Скопировал профиль **{user.first_name}**!\nИмя и bio изменены.\nДля возврата: `.восстановить`")
+            await client.send_message(event.chat_id, f"✅ Скопировал профиль **{user.first_name}**!\nДля возврата: `.восстановить`")
     except Exception as e:
         await client.send_message(event.chat_id, f"❌ Ошибка: {e}")
 
@@ -243,7 +276,7 @@ async def cmd_copy_profile(event):
 async def cmd_restore_profile(event):
     await event.delete()
     if not original_profile:
-        await client.send_message(event.chat_id, "❌ Нечего восстанавливать — сначала используй .копировать")
+        await client.send_message(event.chat_id, "❌ Нечего восстанавливать")
         return
     try:
         await client(UpdateProfileRequest(
@@ -251,7 +284,7 @@ async def cmd_restore_profile(event):
             last_name=original_profile.get("last_name", ""),
             about=original_profile.get("about", "")
         ))
-        await client.send_message(event.chat_id, "✅ Имя и bio восстановлены!\n\n⚠️ Фото восстанови вручную через `.фото`")
+        await client.send_message(event.chat_id, "✅ Профиль восстановлен!\n⚠️ Фото восстанови через `.фото`")
     except Exception as e:
         await client.send_message(event.chat_id, f"❌ Ошибка: {e}")
 
@@ -276,7 +309,127 @@ async def cmd_me(event):
 @client.on(events.NewMessage(outgoing=True, pattern=r'^\.ping$'))
 async def cmd_ping(event):
     await event.delete()
-    await client.send_message(event.chat_id, "🟢 Бот работает!")
+    mood_labels = {"normal": "😐 Норм", "evil": "😠 Злой", "happy": "😄 Весёлый", "sad": "😢 Грустный"}
+    invis = "🔒 Вкл" if invisible_mode else "🔓 Выкл"
+    await client.send_message(event.chat_id, f"🟢 Бот работает!\n🎭 Настроение: {mood_labels.get(bot_mood, 'Норм')}\n👁 Невидимка: {invis}")
+
+# ============ ПОГОДА ============
+
+@client.on(events.NewMessage(outgoing=True, pattern=r'^\.погода (.+)$'))
+async def cmd_weather(event):
+    await event.delete()
+    city = event.pattern_match.group(1)
+    try:
+        import urllib.request
+        import json
+        url = f"https://wttr.in/{urllib.parse.quote(city)}?format=j1&lang=ru"
+        with urllib.request.urlopen(url, timeout=5) as r:
+            data = json.loads(r.read())
+        current = data["current_condition"][0]
+        temp = current["temp_C"]
+        feels = current["FeelsLikeC"]
+        desc = current["lang_ru"][0]["value"]
+        wind = current["windspeedKmph"]
+        humidity = current["humidity"]
+        await client.send_message(event.chat_id, f"""🌦️ **Погода в {city}:**
+
+🌡️ Температура: **{temp}°C** (ощущается {feels}°C)
+☁️ {desc}
+💨 Ветер: {wind} км/ч
+💧 Влажность: {humidity}%
+""")
+    except Exception as e:
+        await client.send_message(event.chat_id, f"❌ Не удалось получить погоду для **{city}**\nПроверь название города")
+
+# ============ СТАТИСТИКА ============
+
+@client.on(events.NewMessage(incoming=True))
+async def track_messages(event):
+    if event.sender_id:
+        stats[event.chat_id][event.sender_id] += 1
+
+@client.on(events.NewMessage(outgoing=True, pattern=r'^\.стат$'))
+async def cmd_stats(event):
+    await event.delete()
+    chat_id = event.chat_id
+    if not stats[chat_id]:
+        await client.send_message(chat_id, "📊 Статистика пока пустая — никто не писал с момента запуска бота")
+        return
+    sorted_users = sorted(stats[chat_id].items(), key=lambda x: x[1], reverse=True)[:10]
+    text = "📊 **Кто чаще пишет:**\n\n"
+    medals = ["🥇", "🥈", "🥉"]
+    for i, (user_id, count) in enumerate(sorted_users):
+        try:
+            user = await client.get_entity(user_id)
+            name = getattr(user, 'first_name', 'Неизвестный') or 'Неизвестный'
+            username = f"@{user.username}" if getattr(user, 'username', None) else ""
+            medal = medals[i] if i < 3 else f"{i+1}."
+            text += f"{medal} {name} {username} — **{count}** сообщ.\n"
+        except Exception:
+            text += f"{i+1}. Неизвестный — **{count}** сообщ.\n"
+    await client.send_message(chat_id, text)
+
+# ============ НАПОМИНАНИЯ ============
+
+@client.on(events.NewMessage(outgoing=True, pattern=r'^\.напомни (\d+) (.+)$'))
+async def cmd_remind(event):
+    await event.delete()
+    minutes = int(event.pattern_match.group(1))
+    text = event.pattern_match.group(2)
+    chat_id = event.chat_id
+    await client.send_message(chat_id, f"⏰ Напомню через **{minutes} мин:** _{text}_")
+
+    async def remind():
+        await asyncio.sleep(minutes * 60)
+        await client.send_message(chat_id, f"⏰ **Напоминание!**\n\n{text}")
+
+    asyncio.create_task(remind())
+
+# ============ НЕВИДИМКА ============
+
+@client.on(events.NewMessage(outgoing=True, pattern=r'^\.невидимка$'))
+async def cmd_invisible_on(event):
+    global invisible_mode
+    await event.delete()
+    invisible_mode = True
+    try:
+        await client(UpdateStatusRequest(offline=True))
+    except Exception:
+        pass
+    await client.send_message(event.chat_id, "🔒 Невидимка **включена** — бот будет отвечать за тебя\nВыключить: `.видимка`")
+
+@client.on(events.NewMessage(outgoing=True, pattern=r'^\.видимка$'))
+async def cmd_invisible_off(event):
+    global invisible_mode
+    await event.delete()
+    invisible_mode = False
+    await client.send_message(event.chat_id, "🔓 Невидимка **выключена** — теперь ты онлайн")
+
+# ============ НАСТРОЕНИЕ ============
+
+@client.on(events.NewMessage(outgoing=True, pattern=r'^\.настроение (.+)$'))
+async def cmd_mood(event):
+    global bot_mood
+    await event.delete()
+    mood_input = event.pattern_match.group(1).lower().strip()
+    moods = {
+        "злой": "evil",
+        "evil": "evil",
+        "весёлый": "happy",
+        "веселый": "happy",
+        "happy": "happy",
+        "грустный": "sad",
+        "sad": "sad",
+        "норм": "normal",
+        "normal": "normal",
+        "обычный": "normal",
+    }
+    if mood_input not in moods:
+        await client.send_message(event.chat_id, "❌ Доступные настроения: `злой`, `весёлый`, `грустный`, `норм`")
+        return
+    bot_mood = moods[mood_input]
+    labels = {"evil": "😠 Злой", "happy": "😄 Весёлый", "sad": "😢 Грустный", "normal": "😐 Обычный"}
+    await client.send_message(event.chat_id, f"🎭 Настроение бота: **{labels[bot_mood]}**")
 
 # ============ ИГРЫ ============
 
@@ -293,14 +446,12 @@ async def cmd_coin(event):
     result = random.choice(["👑 Орёл!", "🪙 Решка!"])
     await client.send_message(event.chat_id, result)
 
-# 🎱 Шар — для тебя (исходящие)
 @client.on(events.NewMessage(outgoing=True, pattern=r'^\.шар (.+)$'))
 async def cmd_ball_out(event):
     await event.delete()
     question = event.pattern_match.group(1)
     await client.send_message(event.chat_id, f"🎱 Вопрос: _{question}_\n\n{random.choice(BALL_ANSWERS)}")
 
-# 🎱 Шар — для других (входящие) — любой может написать .шар
 @client.on(events.NewMessage(incoming=True, pattern=r'^\.шар (.+)$'))
 async def cmd_ball_in(event):
     question = event.pattern_match.group(1)
@@ -312,7 +463,7 @@ async def cmd_game_start(event):
     await event.delete()
     number = random.randint(1, 100)
     games[event.chat_id] = {"number": number, "attempts": 0}
-    await client.send_message(event.chat_id, "🎮 **Угадай число от 1 до 100!**\nПиши `.г <число>` чтобы угадать\nНапример: `.г 50`")
+    await client.send_message(event.chat_id, "🎮 **Угадай число от 1 до 100!**\nПиши `.г <число>`\nНапример: `.г 50`")
 
 @client.on(events.NewMessage(pattern=r'^\.г (\d+)$'))
 async def cmd_game_guess(event):
@@ -335,7 +486,7 @@ async def cmd_game_guess(event):
         await event.reply(f"📉 Меньше, {name}! (попытка {attempts})")
     else:
         del games[chat_id]
-        await event.reply(f"🎉 {name} угадал! Число было **{number}**\nПотрачено попыток: **{attempts}**")
+        await event.reply(f"🎉 {name} угадал! Число было **{number}**\nПопыток: **{attempts}**")
 
 # ============ АВТООТВЕТЫ ============
 
@@ -345,20 +496,20 @@ async def handler_private(event):
         return
     if event.raw_text.startswith(".шар") or event.raw_text.startswith(".г"):
         return
+    if girlfriend_id is not None and event.sender_id == girlfriend_id:
+        return
     if await is_online():
         return
 
-    is_girlfriend = (girlfriend_id is not None and event.sender_id == girlfriend_id)
-
-    animation = random.choice(GIRLFRIEND_ANIMATIONS if is_girlfriend else ANIMATIONS)
+    animation = random.choice(ANIMATIONS)
     msg = await event.respond(animation[0])
     for frame in animation[1:]:
         await asyncio.sleep(0.4)
         await msg.edit(frame)
 
-    time_of_day, auto_reply = get_time_mood(is_girlfriend)
+    time_of_day, auto_reply = get_time_mood()
 
-    if not is_girlfriend and random.random() < 0.25:
+    if random.random() < 0.25:
         await asyncio.sleep(0.3)
         await msg.edit(auto_reply)
         return
@@ -367,7 +518,7 @@ async def handler_private(event):
         response = ai.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=100,
-            system=get_system_prompt(time_of_day, is_girlfriend),
+            system=get_system_prompt(time_of_day),
             messages=[{"role": "user", "content": event.raw_text}]
         )
         await msg.edit(response.content[0].text)
@@ -420,4 +571,5 @@ async def main():
     print("Бот запущен! ✅")
     await client.run_until_disconnected()
 
+import urllib.parse
 asyncio.run(main())
