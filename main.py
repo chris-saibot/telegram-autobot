@@ -1,14 +1,13 @@
 import asyncio
 import os
 import random
-from datetime import datetime
-from PIL import Image
-import io
+from datetime import datetime, timezone, timedelta
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.types import UserStatusOnline
 from telethon.tl.functions.account import UpdateProfileRequest
 from telethon.tl.functions.photos import UploadProfilePhotoRequest as PhotoUpload
+from telethon.tl.functions.users import GetFullUserRequest
 import anthropic
 
 API_ID = int(os.environ["API_ID"])
@@ -26,7 +25,7 @@ games = {}
 
 ANIMATIONS = [
     ["🔥", "🔥🔥", "🔥🔥🔥", "💥", "✨"],
-    ["⭐️", "🌟", "💫", "✨", "🌠"],
+    ["⭐", "🌟", "💫", "✨", "🌠"],
     ["😴", "😴💤", "😴💤💤", "🛌💤", "🤖"],
     ["👻", "👻💀", "💀👻", "👻", "😱"],
 ]
@@ -66,15 +65,24 @@ GROUP_REPLIES = [
     "Сейчас недоступен, увидит позже",
 ]
 
-def to_jpeg(data: bytes) -> io.BytesIO:
-    img = Image.open(io.BytesIO(data))
-    buf = io.BytesIO()
-    img.convert("RGB").save(buf, format="JPEG")
-    buf.seek(0)
-    return buf
+BALL_ANSWERS = [
+    "✅ Определённо да",
+    "✅ Скорее всего да",
+    "🌫️ Туманно, спроси позже",
+    "❌ Сомневаюсь",
+    "❌ Определённо нет",
+    "🔮 Звёзды говорят да",
+    "💫 Всё возможно",
+    "⚡ Не рассчитывай на это",
+    "🎯 Да, но осторожно",
+    "🌙 Спроси ночью — тогда отвечу точнее",
+]
+
+def get_tashkent_hour():
+    return (datetime.now(timezone.utc) + timedelta(hours=5)).hour
 
 def get_time_mood(is_girlfriend=False):
-    hour = (datetime.now().hour + 5) % 24
+    hour = get_tashkent_hour()
     if is_girlfriend:
         if 6 <= hour < 11:
             return "morning", "Доброе утро солнышко ☀️❤️"
@@ -117,11 +125,19 @@ def get_system_prompt(time_of_day, is_girlfriend=False, is_group=False):
             base += "\n- Утро, намекни что только проснулся"
         return base
 
+# Кэш статуса онлайн (обновляется раз в 10 сек)
+_online_cache = {"status": False, "updated": 0}
+
 async def is_online():
+    now = asyncio.get_event_loop().time()
+    if now - _online_cache["updated"] < 10:
+        return _online_cache["status"]
     try:
         me = await client.get_me()
         my_entity = await client.get_entity(me.id)
-        return isinstance(my_entity.status, UserStatusOnline)
+        _online_cache["status"] = isinstance(my_entity.status, UserStatusOnline)
+        _online_cache["updated"] = now
+        return _online_cache["status"]
     except Exception:
         return False
 
@@ -145,7 +161,7 @@ async def cmd_help(event):
 `.г <число>` — сделать попытку
 `.кубик` — бросить кубик
 `.монета` — орёл или решка
-`.шар вопрос` — магический шар
+`.шар вопрос` — магический шар (и другие тоже могут!)
 
 ℹ️ **Другое:**
 `.ping` — проверить бота
@@ -177,10 +193,13 @@ async def cmd_photo(event):
     if not reply or not reply.photo:
         await client.send_message(event.chat_id, "❌ Ответь на фото командой .фото")
         return
-    file = await reply.download_media(bytes)
-    file = to_jpeg(file)  # конвертация в JPEG
-    await client(PhotoUpload(file=await client.upload_file(file)))
-    await client.send_message(event.chat_id, "✅ Фото профиля обновлено!")
+    try:
+        file = await reply.download_media(bytes)
+        uploaded = await client.upload_file(file, file_name="photo.jpg")
+        await client(PhotoUpload(file=uploaded))
+        await client.send_message(event.chat_id, "✅ Фото профиля обновлено!")
+    except Exception as e:
+        await client.send_message(event.chat_id, f"❌ Ошибка: {e}")
 
 @client.on(events.NewMessage(outgoing=True, pattern=r'^\.копировать$'))
 async def cmd_copy_profile(event):
@@ -190,30 +209,35 @@ async def cmd_copy_profile(event):
         await client.send_message(event.chat_id, "❌ Ответь на сообщение человека командой .копировать")
         return
 
-    # Сохраняем свой оригинальный профиль
-    me = await client.get_me()
-    original_profile["first_name"] = me.first_name or ""
-    original_profile["last_name"] = me.last_name or ""
-    original_profile["about"] = getattr(me, "about", "") or ""
+    try:
+        me = await client.get_me()
+        my_full = await client(GetFullUserRequest(me.id))
+        original_profile["first_name"] = getattr(me, 'first_name', '') or ""
+        original_profile["last_name"] = getattr(me, 'last_name', '') or ""
+        original_profile["about"] = getattr(my_full.full_user, 'about', '') or ""
 
-    # Получаем профиль цели
-    user = await reply.get_sender()
+        user = await reply.get_sender()
+        user_full = await client(GetFullUserRequest(user.id))
 
-    # Меняем имя
-    await client(UpdateProfileRequest(
-        first_name=user.first_name or "",
-        last_name=user.last_name or ""
-    ))
+        await client(UpdateProfileRequest(
+            first_name=getattr(user, 'first_name', '') or "",
+            last_name=getattr(user, 'last_name', '') or ""
+        ))
 
-    # Меняем фото если есть
-    photos = await client.get_profile_photos(user.id)
-    if photos:
-        file = await client.download_media(photos[0], bytes)
-        file = to_jpeg(file)  # конвертация в JPEG
-        await client(PhotoUpload(file=await client.upload_file(file)))
-        await client.send_message(event.chat_id, f"✅ Скопировал профиль **{user.first_name}**!\nИмя и фото изменены.\nДля возврата: `.восстановить`")
-    else:
-        await client.send_message(event.chat_id, f"✅ Скопировал имя **{user.first_name}**!\nФото у него нет.\nДля возврата: `.восстановить`")
+        user_about = getattr(user_full.full_user, 'about', '') or ""
+        if user_about:
+            await client(UpdateProfileRequest(about=user_about))
+
+        photos = await client.get_profile_photos(user.id)
+        if photos:
+            file = await client.download_media(photos[0], bytes)
+            uploaded = await client.upload_file(file, file_name="photo.jpg")
+            await client(PhotoUpload(file=uploaded))
+            await client.send_message(event.chat_id, f"✅ Скопировал профиль **{user.first_name}**!\nИмя, bio и фото изменены.\nДля возврата: `.восстановить`")
+        else:
+            await client.send_message(event.chat_id, f"✅ Скопировал профиль **{user.first_name}**!\nИмя и bio изменены.\nДля возврата: `.восстановить`")
+    except Exception as e:
+        await client.send_message(event.chat_id, f"❌ Ошибка: {e}")
 
 @client.on(events.NewMessage(outgoing=True, pattern=r'^\.восстановить$'))
 async def cmd_restore_profile(event):
@@ -221,26 +245,33 @@ async def cmd_restore_profile(event):
     if not original_profile:
         await client.send_message(event.chat_id, "❌ Нечего восстанавливать — сначала используй .копировать")
         return
-
-    await client(UpdateProfileRequest(
-        first_name=original_profile.get("first_name", ""),
-        last_name=original_profile.get("last_name", ""),
-        about=original_profile.get("about", "")
-    ))
-
-    await client.send_message(event.chat_id, "✅ Имя и bio восстановлены!\n\n⚠️ Фото восстанови вручную через `.фото`")
+    try:
+        await client(UpdateProfileRequest(
+            first_name=original_profile.get("first_name", ""),
+            last_name=original_profile.get("last_name", ""),
+            about=original_profile.get("about", "")
+        ))
+        await client.send_message(event.chat_id, "✅ Имя и bio восстановлены!\n\n⚠️ Фото восстанови вручную через `.фото`")
+    except Exception as e:
+        await client.send_message(event.chat_id, f"❌ Ошибка: {e}")
 
 @client.on(events.NewMessage(outgoing=True, pattern=r'^\.я$'))
 async def cmd_me(event):
     await event.delete()
-    me = await client.get_me()
-    await client.send_message(event.chat_id, f"""👤 **Информация о тебе:**
+    try:
+        me = await client.get_me()
+        me_full = await client(GetFullUserRequest(me.id))
+        bio = getattr(me_full.full_user, 'about', '') or 'нет'
+        await client.send_message(event.chat_id, f"""👤 **Информация о тебе:**
 
 🔹 Имя: {me.first_name or ''} {me.last_name or ''}
 🔹 Username: @{me.username or 'нет'}
 🔹 ID: `{me.id}`
+🔹 Bio: {bio}
 🔹 Телефон: `{me.phone or 'скрыт'}`
 """)
+    except Exception as e:
+        await client.send_message(event.chat_id, f"❌ Ошибка: {e}")
 
 @client.on(events.NewMessage(outgoing=True, pattern=r'^\.ping$'))
 async def cmd_ping(event):
@@ -262,21 +293,19 @@ async def cmd_coin(event):
     result = random.choice(["👑 Орёл!", "🪙 Решка!"])
     await client.send_message(event.chat_id, result)
 
+# 🎱 Шар — для тебя (исходящие)
 @client.on(events.NewMessage(outgoing=True, pattern=r'^\.шар (.+)$'))
-async def cmd_ball(event):
+async def cmd_ball_out(event):
     await event.delete()
     question = event.pattern_match.group(1)
-    answers = [
-        "✅ Определённо да",
-        "✅ Скорее всего да",
-        "🌫 Туманно, спроси позже",
-        "❌ Сомневаюсь",
-        "❌ Определённо нет",
-        "🔮 Звёзды говорят да",
-        "💫 Всё возможно",
-        "⚡️ Не рассчитывай на это",
-    ]
-    await client.send_message(event.chat_id, f"🎱 Вопрос: _{question}_\n\n{random.choice(answers)}")
+    await client.send_message(event.chat_id, f"🎱 Вопрос: _{question}_\n\n{random.choice(BALL_ANSWERS)}")
+
+# 🎱 Шар — для других (входящие) — любой может написать .шар
+@client.on(events.NewMessage(incoming=True, pattern=r'^\.шар (.+)$'))
+async def cmd_ball_in(event):
+    question = event.pattern_match.group(1)
+    await asyncio.sleep(random.uniform(0.5, 1.5))
+    await event.reply(f"🎱 Вопрос: _{question}_\n\n{random.choice(BALL_ANSWERS)}")
 
 @client.on(events.NewMessage(outgoing=True, pattern=r'^\.игра$'))
 async def cmd_game_start(event):
@@ -285,24 +314,28 @@ async def cmd_game_start(event):
     games[event.chat_id] = {"number": number, "attempts": 0}
     await client.send_message(event.chat_id, "🎮 **Угадай число от 1 до 100!**\nПиши `.г <число>` чтобы угадать\nНапример: `.г 50`")
 
-@client.on(events.NewMessage(outgoing=True, pattern=r'^\.г (\d+)$'))
+@client.on(events.NewMessage(pattern=r'^\.г (\d+)$'))
 async def cmd_game_guess(event):
-    await event.delete()
+    if event.out:
+        await event.delete()
     chat_id = event.chat_id
     if chat_id not in games:
-        await client.send_message(chat_id, "❌ Сначала начни игру: `.игра`")
+        if event.out:
+            await client.send_message(chat_id, "❌ Сначала начни игру: `.игра`")
         return
     guess = int(event.pattern_match.group(1))
     games[chat_id]["attempts"] += 1
     attempts = games[chat_id]["attempts"]
     number = games[chat_id]["number"]
+    sender = await event.get_sender()
+    name = getattr(sender, 'first_name', 'Игрок') or 'Игрок'
     if guess < number:
-        await client.send_message(chat_id, f"📈 Больше! (попытка {attempts})")
+        await event.reply(f"📈 Больше, {name}! (попытка {attempts})")
     elif guess > number:
-        await client.send_message(chat_id, f"📉 Меньше! (попытка {attempts})")
+        await event.reply(f"📉 Меньше, {name}! (попытка {attempts})")
     else:
         del games[chat_id]
-        await client.send_message(chat_id, f"🎉 Угадал! Число было **{number}**\nПотрачено попыток: **{attempts}**")
+        await event.reply(f"🎉 {name} угадал! Число было **{number}**\nПотрачено попыток: **{attempts}**")
 
 # ============ АВТООТВЕТЫ ============
 
@@ -310,16 +343,14 @@ async def cmd_game_guess(event):
 async def handler_private(event):
     if not event.raw_text or event.raw_text.strip() == "":
         return
+    if event.raw_text.startswith(".шар") or event.raw_text.startswith(".г"):
+        return
     if await is_online():
         return
 
     is_girlfriend = (girlfriend_id is not None and event.sender_id == girlfriend_id)
 
-    if is_girlfriend:
-        animation = random.choice(GIRLFRIEND_ANIMATIONS)
-    else:
-        animation = random.choice(ANIMATIONS)
-
+    animation = random.choice(GIRLFRIEND_ANIMATIONS if is_girlfriend else ANIMATIONS)
     msg = await event.respond(animation[0])
     for frame in animation[1:]:
         await asyncio.sleep(0.4)
@@ -347,6 +378,8 @@ async def handler_private(event):
 async def handler_group(event):
     if not event.raw_text or event.raw_text.strip() == "":
         return
+    if event.raw_text.startswith(".шар") or event.raw_text.startswith(".г"):
+        return
     if await is_online():
         return
 
@@ -363,7 +396,7 @@ async def handler_group(event):
 
     try:
         response = ai.messages.create(
-            model="claude-sonnet-4-5",
+            model="claude-sonnet-4-6",
             max_tokens=60,
             system=get_system_prompt(None, is_group=True),
             messages=[{"role": "user", "content": event.raw_text}]
