@@ -17,12 +17,10 @@ import anthropic
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 ANTHROPIC_KEY = os.environ["ANTHROPIC_KEY"]
-SESSION_STRING = os.environ["SESSION_STRING"])
+SESSION_STRING = os.environ["SESSION_STRING"]  # ✅ убрал лишнюю скобку
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 ai = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
-
-# ============ НАСТРОЙКИ ============
 
 OWNER_INFO = """
 Имя: Кристофер
@@ -38,13 +36,10 @@ games = {}
 invisible_mode = False
 bot_mood = "normal"
 blocked_users = set()
-
-# Память разговоров: user_id -> list of {role, content}
 conversation_memory = defaultdict(list)
-MAX_MEMORY = 10  # последних сообщений на человека
-
-# Сводка пропущенных: user_id -> list of messages
 missed_messages = defaultdict(list)
+stats = defaultdict(lambda: defaultdict(int))
+MAX_MEMORY = 8
 
 ANIMATIONS = [
     ["🔥", "🔥🔥", "🔥🔥🔥", "💥", "✨"],
@@ -58,7 +53,7 @@ BALL_ANSWERS = [
     "🌫️ Туманно, спроси позже", "❌ Сомневаюсь",
     "❌ Определённо нет", "🔮 Звёзды говорят да",
     "💫 Всё возможно", "⚡ Не рассчитывай на это",
-    "🎯 Да, но осторожно", "🌙 Спроси ночью — тогда точнее",
+    "🎯 Да, но осторожно", "🌙 Спроси ночью — точнее",
 ]
 
 GROUP_REPLIES = [
@@ -97,7 +92,7 @@ def build_system_prompt(is_group=False):
 Настроение: {get_mood_context()}
 Коротко, 1 предложение, живо."""
 
-    return f"""Ты — личный ИИ-агент Кристофера в Telegram. Ты отвечаешь вместо него.
+    return f"""Ты — личный ИИ-агент Кристофера в Telegram. Отвечаешь вместо него.
 
 О ХОЗЯИНЕ:
 {OWNER_INFO}
@@ -105,27 +100,40 @@ def build_system_prompt(is_group=False):
 ТЕКУЩИЙ КОНТЕКСТ: {get_time_context()}
 НАСТРОЕНИЕ: {get_mood_context()}
 
-ТВОИ ВОЗМОЖНОСТИ:
-1. Отвечаешь на вопросы о Кристофере (кто он, где работает, когда будет)
-2. Решаешь когда ответить по теме а когда сказать что занят
-3. Помнишь контекст разговора с этим человеком
-4. На срочные сообщения реагируешь сразу
+ТВОИ ЗАДАЧИ:
+1. Отвечать на вопросы о Кристофере (кто он, где работает, когда будет)
+2. Решать когда ответить по теме а когда сказать что занят
+3. Учитывать контекст предыдущих сообщений этого человека
+4. На срочные сообщения реагировать сразу
 
-ПРАВИЛА ОТВЕТОВ:
-- Пиши от первого лица ("я занят", "напишу позже") — как будто это сам Кристофер
+ПРАВИЛА:
+- Пиши от первого лица как будто это сам Кристофер
 - С заглавной буквы, коротко 1-2 предложения
 - Живо и естественно, иногда "щас", "норм", "блин"
 - Без лишних эмодзи, максимум 1
-- Если спрашивают о работе — говори что работаешь в Uzum в Ташкенте
-- Если спрашивают когда будет — говори что освободится позже и напишет
+- Если спрашивают о работе — работаешь в Uzum в Ташкенте
+- Если спрашивают когда будет — освободится позже и напишет
 
-ТИПЫ СООБЩЕНИЙ И КАК ОТВЕЧАТЬ:
-- СРОЧНОЕ → сразу отвечай что увидел, постараешься ответить скорее
-- ВОПРОС О КРИСТОФЕРЕ → отвечай по теме коротко
-- ВОПРОС НА КОТОРЫЙ МОЖНО ОТВЕТИТЬ → ответь коротко
-- ПРИВЕТ/МЕЛКИЙ РАЗГОВОР → скажи привет и что занят
+КАК ОТВЕЧАТЬ:
+- СРОЧНОЕ (помогите/важно/беда) → скажи что увидел, ответишь скорее
+- ВОПРОС О СЕБЕ → ответь коротко по теме
+- ПРИВЕТ → скажи привет и что занят
 - ОСТАЛЬНОЕ → скажи что занят, ответишь позже
 """
+
+def add_to_memory(user_id, role, content):
+    # ✅ исправлено: правильное ограничение памяти
+    conversation_memory[user_id].append({"role": role, "content": content})
+    if len(conversation_memory[user_id]) > MAX_MEMORY * 2:
+        conversation_memory[user_id] = conversation_memory[user_id][-(MAX_MEMORY * 2):]
+
+def get_memory(user_id):
+    # ✅ исправлено: возвращаем только нужные поля для API
+    msgs = conversation_memory[user_id][-(MAX_MEMORY * 2):]
+    # Убеждаемся что начинается с user
+    if msgs and msgs[0]["role"] != "user":
+        msgs = msgs[1:]
+    return msgs if msgs else [{"role": "user", "content": "привет"}]
 
 _online_cache = {"status": False, "updated": 0}
 
@@ -143,14 +151,6 @@ async def is_online():
         return _online_cache["status"]
     except Exception:
         return False
-
-def add_to_memory(user_id, role, content):
-    conversation_memory[user_id].append({"role": role, "content": content})
-    if len(conversation_memory[user_id]) > MAX_MEMORY * 2:
-        conversation_memory[user_id] = conversation_memory[user_id][-MAX_MEMORY * 2:]
-
-def get_memory(user_id):
-    return conversation_memory[user_id][-MAX_MEMORY:]
 
 # ============ ПОМОЩЬ ============
 
@@ -246,7 +246,6 @@ async def cmd_copy(event):
         original_profile["first_name"] = getattr(me, 'first_name', '') or ""
         original_profile["last_name"] = getattr(me, 'last_name', '') or ""
         original_profile["about"] = getattr(my_full.full_user, 'about', '') or ""
-
         user = await reply.get_sender()
         user_full = await client(GetFullUserRequest(user.id))
         await client(UpdateProfileRequest(
@@ -304,13 +303,14 @@ async def cmd_ping(event):
     mood_labels = {"normal": "😐 Норм", "evil": "😠 Злой", "happy": "😄 Весёлый", "sad": "😢 Грустный"}
     invis = "🔒 Вкл" if invisible_mode else "🔓 Выкл"
     memory_count = sum(len(v) for v in conversation_memory.values())
+    missed_count = sum(len(v) for v in missed_messages.values())
     await client.send_message(event.chat_id, f"""🟢 Агент активен!
 🎭 Настроение: {mood_labels.get(bot_mood, 'Норм')}
 👁 Невидимка: {invis}
 🧠 Диалогов в памяти: {len(conversation_memory)}
 💬 Сообщений помню: {memory_count}
 🚫 В стоп-листе: {len(blocked_users)}
-📋 Пропущено: {sum(len(v) for v in missed_messages.values())}
+📋 Пропущено: {missed_count}
 """)
 
 # ============ СТОП-ЛИСТ ============
@@ -364,8 +364,8 @@ async def cmd_summary(event):
     if not any(missed_messages.values()):
         await client.send_message(event.chat_id, "📋 Пропущенных сообщений нет")
         return
-
     text = "📋 **Пропущенные сообщения:**\n\n"
+    all_msgs_flat = []
     for user_id, messages in missed_messages.items():
         if not messages:
             continue
@@ -375,27 +375,23 @@ async def cmd_summary(event):
             username = f"@{user.username}" if getattr(user, 'username', None) else ""
             text += f"👤 **{name}** {username} ({len(messages)} сообщ.):\n"
             for m in messages[-3:]:
-                text += f"  • _{m[:50]}{'...' if len(m) > 50 else ''}_\n"
+                preview = m[:50] + ('...' if len(m) > 50 else '')
+                text += f"  • _{preview}_\n"
             text += "\n"
+            all_msgs_flat.extend(messages)
         except Exception:
             pass
-
-    # ИИ делает краткую сводку
-    try:
-        all_msgs = []
-        for uid, msgs in missed_messages.items():
-            all_msgs.extend(msgs)
-        if all_msgs:
+    if all_msgs_flat:
+        try:
             summary = ai.messages.create(
                 model="claude-sonnet-4-6",
                 max_tokens=150,
                 system="Сделай краткую сводку пропущенных сообщений в 2-3 предложениях. На русском, коротко.",
-                messages=[{"role": "user", "content": "\n".join(all_msgs)}]
+                messages=[{"role": "user", "content": "\n".join(all_msgs_flat)}]
             )
             text += f"\n🧠 **Итог:** {summary.content[0].text}"
-    except Exception:
-        pass
-
+        except Exception:
+            pass
     await client.send_message(event.chat_id, text)
 
 @client.on(events.NewMessage(outgoing=True, pattern=r'^\.очистить$'))
@@ -425,13 +421,6 @@ async def cmd_weather(event):
         await client.send_message(event.chat_id, f"❌ Не удалось получить погоду для **{city}**")
 
 # ============ СТАТИСТИКА ============
-
-stats = defaultdict(lambda: defaultdict(int))
-
-@client.on(events.NewMessage(incoming=True))
-async def track_messages(event):
-    if event.sender_id:
-        stats[event.chat_id][event.sender_id] += 1
 
 @client.on(events.NewMessage(outgoing=True, pattern=r'^\.стат$'))
 async def cmd_stats(event):
@@ -496,8 +485,9 @@ async def cmd_mood(event):
     await event.delete()
     mood_input = event.pattern_match.group(1).lower().strip()
     moods = {
-        "злой": "evil", "весёлый": "happy", "веселый": "happy",
-        "грустный": "sad", "норм": "normal", "обычный": "normal",
+        "злой": "evil", "весёлый": "happy",
+        "веселый": "happy", "грустный": "sad",
+        "норм": "normal", "обычный": "normal",
     }
     if mood_input not in moods:
         await client.send_message(event.chat_id, "❌ Доступные: `злой`, `весёлый`, `грустный`, `норм`")
@@ -578,8 +568,11 @@ async def handler_private(event):
 
     user_id = event.sender_id
 
-    # Сохраняем в сводку пропущенных
+    # Сохраняем в сводку
     missed_messages[user_id].append(event.raw_text)
+
+    # Считаем статистику
+    stats[event.chat_id][user_id] += 1
 
     # Анимация
     animation = random.choice(ANIMATIONS)
@@ -588,10 +581,10 @@ async def handler_private(event):
         await asyncio.sleep(0.4)
         await msg.edit(frame)
 
-    # Добавляем сообщение в память
+    # Добавляем в память
     add_to_memory(user_id, "user", event.raw_text)
 
-    # Строим историю для ИИ
+    # Получаем историю
     history = get_memory(user_id)
 
     try:
@@ -602,15 +595,11 @@ async def handler_private(event):
             messages=history
         )
         reply_text = response.content[0].text
-
-        # Сохраняем ответ в память
         add_to_memory(user_id, "assistant", reply_text)
-
         await msg.edit(reply_text)
-
-    except Exception:
-        fallback = "Занят щас, позже напишу"
-        await msg.edit(fallback)
+    except Exception as e:
+        print(f"Ошибка ИИ: {e}")
+        await msg.edit("Занят щас, позже напишу")
 
 @client.on(events.NewMessage(incoming=True, func=lambda e: not e.is_private))
 async def handler_group(event):
@@ -621,9 +610,19 @@ async def handler_group(event):
     if await is_online():
         return
 
-    me = await client.get_me()
-    mentioned = event.mentioned or (me.username and f"@{me.username}" in event.raw_text)
-    if not mentioned:
+    # Считаем статистику групп
+    if event.sender_id:
+        stats[event.chat_id][event.sender_id] += 1
+
+    # ✅ исправлено: безопасная проверка упоминания
+    try:
+        me = await client.get_me()
+        mentioned = getattr(event, 'mentioned', False)
+        if not mentioned and me.username:
+            mentioned = f"@{me.username}" in (event.raw_text or "")
+        if not mentioned:
+            return
+    except Exception:
         return
 
     await asyncio.sleep(random.uniform(1, 3))
