@@ -1,7 +1,9 @@
 import asyncio
 import os
 import random
-import re
+import json
+import urllib.parse
+import urllib.request
 from datetime import datetime, timezone, timedelta
 from collections import defaultdict
 from telethon import TelegramClient, events
@@ -15,18 +17,34 @@ import anthropic
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 ANTHROPIC_KEY = os.environ["ANTHROPIC_KEY"]
-SESSION_STRING = os.environ["SESSION_STRING"]
+SESSION_STRING = os.environ["SESSION_STRING"])
 
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 ai = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+
+# ============ НАСТРОЙКИ ============
+
+OWNER_INFO = """
+Имя: Кристофер
+Работа: Uzum (узум) — крупный маркетплейс в Узбекистане
+Город: Ташкент, Узбекистан
+Стиль общения: коротко, по делу, иногда "щас", "норм", "блин"
+"""
 
 GIRLFRIEND_PHONE = "+998901227646"
 girlfriend_id = None
 original_profile = {}
 games = {}
-stats = defaultdict(lambda: defaultdict(int))  # chat_id -> user_id -> count
 invisible_mode = False
-bot_mood = "normal"  # normal / evil / happy / sad
+bot_mood = "normal"
+blocked_users = set()
+
+# Память разговоров: user_id -> list of {role, content}
+conversation_memory = defaultdict(list)
+MAX_MEMORY = 10  # последних сообщений на человека
+
+# Сводка пропущенных: user_id -> list of messages
+missed_messages = defaultdict(list)
 
 ANIMATIONS = [
     ["🔥", "🔥🔥", "🔥🔥🔥", "💥", "✨"],
@@ -35,115 +53,83 @@ ANIMATIONS = [
     ["👻", "👻💀", "💀👻", "👻", "😱"],
 ]
 
-FUNNY_MORNING = [
-    "Ааа, рано ещё... позже напишу",
-    "Сплю пока, не трогай 😴",
-    "Без кофе не соображаю, позже",
-    "Только встал, дай прийти в себя",
-]
-FUNNY_DAY = [
-    "Занят щас, позже отпишу",
-    "Не могу, позже",
-    "Блин, занят. Отвечу как смогу",
-    "Щас не до этого, позже гляну",
-    "Занят, не теряй — отвечу",
-]
-FUNNY_EVENING = [
-    "Отдыхаю, позже напишу",
-    "Вечер, устал немного. Позже",
-    "Щас занят, отпишу чуть позже",
-]
-FUNNY_NIGHT = [
-    "Лёг уже, завтра отвечу",
-    "Ночь же, сплю 😴",
-    "Завтра напишу, уже сплю",
-    "Поздно уже... завтра",
+BALL_ANSWERS = [
+    "✅ Определённо да", "✅ Скорее всего да",
+    "🌫️ Туманно, спроси позже", "❌ Сомневаюсь",
+    "❌ Определённо нет", "🔮 Звёзды говорят да",
+    "💫 Всё возможно", "⚡ Не рассчитывай на это",
+    "🎯 Да, но осторожно", "🌙 Спроси ночью — тогда точнее",
 ]
 
 GROUP_REPLIES = [
     "Занят, позже отпишет",
     "Не в сети он сейчас",
-    "Занят он, увидит позже",
-    "Щас недоступен, позже ответит",
-]
-
-BALL_ANSWERS = [
-    "✅ Определённо да",
-    "✅ Скорее всего да",
-    "🌫️ Туманно, спроси позже",
-    "❌ Сомневаюсь",
-    "❌ Определённо нет",
-    "🔮 Звёзды говорят да",
-    "💫 Всё возможно",
-    "⚡ Не рассчитывай на это",
-    "🎯 Да, но осторожно",
-    "🌙 Спроси ночью — тогда точнее",
+    "Щас недоступен, увидит позже",
 ]
 
 def get_tashkent_hour():
     return (datetime.now(timezone.utc) + timedelta(hours=5)).hour
 
-def get_time_mood():
+def get_time_context():
     hour = get_tashkent_hour()
     if 6 <= hour < 11:
-        return "morning", random.choice(FUNNY_MORNING)
+        return "утро, Кристофер только проснулся"
     elif 11 <= hour < 18:
-        return "day", random.choice(FUNNY_DAY)
+        return "день, Кристофер на работе в Uzum"
     elif 18 <= hour < 23:
-        return "evening", random.choice(FUNNY_EVENING)
+        return "вечер, Кристофер отдыхает после работы"
     else:
-        return "night", random.choice(FUNNY_NIGHT)
+        return "ночь, Кристофер спит"
 
-def get_system_prompt(time_of_day, is_group=False):
-    global bot_mood
+def get_mood_context():
+    return {
+        "normal": "нейтральный, по-человечески",
+        "evil": "немного раздражённый, можно лёгкий мат",
+        "happy": "весёлый и позитивный",
+        "sad": "грустный и вялый",
+    }.get(bot_mood, "нейтральный")
 
-    mood_ctx = {
-        "normal": "Отвечай нейтрально и по-человечески",
-        "evil": "Отвечай немного грубо и раздражённо, как будто тебя отвлекли от важного дела. Можно лёгкий мат",
-        "happy": "Отвечай весело и позитивно, можно с юмором и эмодзи",
-        "sad": "Отвечай грустно и вяло, как будто что-то случилось",
-    }.get(bot_mood, "Отвечай нейтрально")
-
+def build_system_prompt(is_group=False):
     if is_group:
-        return f"""Ты — автоответчик человека в групповом чате Telegram.
+        return f"""Ты — ИИ-агент Кристофера в групповом чате Telegram.
+{OWNER_INFO}
 Отвечай от третьего лица — "он занят", "он не в сети".
-НАСТРОЕНИЕ: {mood_ctx}
-СТИЛЬ: коротко, 1 предложение, живо, без лишних эмодзи.
-"""
-    hour = get_tashkent_hour()
-    if 6 <= hour < 11:
-        time_ctx = "Сейчас утро, человек только проснулся"
-    elif 11 <= hour < 18:
-        time_ctx = "Сейчас день, человек занят делами"
-    elif 18 <= hour < 23:
-        time_ctx = "Сейчас вечер, человек отдыхает"
-    else:
-        time_ctx = "Сейчас ночь, человек спит"
+Настроение: {get_mood_context()}
+Коротко, 1 предложение, живо."""
 
-    return f"""Ты — автоответчик реального живого человека в Telegram.
+    return f"""Ты — личный ИИ-агент Кристофера в Telegram. Ты отвечаешь вместо него.
 
-КОНТЕКСТ: {time_ctx}
-НАСТРОЕНИЕ: {mood_ctx}
+О ХОЗЯИНЕ:
+{OWNER_INFO}
 
-ПРАВИЛА:
-- Всегда с заглавной буквы
-- Максимум 1-2 предложения
-- Живо и естественно
-- Иногда: "щас", "норм", "оч", "неа", "ага"
-- Скажи что занят / не в сети / отвечу позже
-- Без шаблонов типа "я недоступен"
+ТЕКУЩИЙ КОНТЕКСТ: {get_time_context()}
+НАСТРОЕНИЕ: {get_mood_context()}
+
+ТВОИ ВОЗМОЖНОСТИ:
+1. Отвечаешь на вопросы о Кристофере (кто он, где работает, когда будет)
+2. Решаешь когда ответить по теме а когда сказать что занят
+3. Помнишь контекст разговора с этим человеком
+4. На срочные сообщения реагируешь сразу
+
+ПРАВИЛА ОТВЕТОВ:
+- Пиши от первого лица ("я занят", "напишу позже") — как будто это сам Кристофер
+- С заглавной буквы, коротко 1-2 предложения
+- Живо и естественно, иногда "щас", "норм", "блин"
 - Без лишних эмодзи, максимум 1
+- Если спрашивают о работе — говори что работаешь в Uzum в Ташкенте
+- Если спрашивают когда будет — говори что освободится позже и напишет
 
-ХОРОШИЕ ПРИМЕРЫ:
-"Занят щас, позже напишу"
-"Блин, не могу сейчас. Позже"
-"Щас не могу, позже гляну"
+ТИПЫ СООБЩЕНИЙ И КАК ОТВЕЧАТЬ:
+- СРОЧНОЕ → сразу отвечай что увидел, постараешься ответить скорее
+- ВОПРОС О КРИСТОФЕРЕ → отвечай по теме коротко
+- ВОПРОС НА КОТОРЫЙ МОЖНО ОТВЕТИТЬ → ответь коротко
+- ПРИВЕТ/МЕЛКИЙ РАЗГОВОР → скажи привет и что занят
+- ОСТАЛЬНОЕ → скажи что занят, ответишь позже
 """
 
 _online_cache = {"status": False, "updated": 0}
 
 async def is_online():
-    global invisible_mode
     if invisible_mode:
         return False
     now = asyncio.get_event_loop().time()
@@ -151,55 +137,67 @@ async def is_online():
         return _online_cache["status"]
     try:
         me = await client.get_me()
-        my_entity = await client.get_entity(me.id)
-        _online_cache["status"] = isinstance(my_entity.status, UserStatusOnline)
+        entity = await client.get_entity(me.id)
+        _online_cache["status"] = isinstance(entity.status, UserStatusOnline)
         _online_cache["updated"] = now
         return _online_cache["status"]
     except Exception:
         return False
+
+def add_to_memory(user_id, role, content):
+    conversation_memory[user_id].append({"role": role, "content": content})
+    if len(conversation_memory[user_id]) > MAX_MEMORY * 2:
+        conversation_memory[user_id] = conversation_memory[user_id][-MAX_MEMORY * 2:]
+
+def get_memory(user_id):
+    return conversation_memory[user_id][-MAX_MEMORY:]
 
 # ============ ПОМОЩЬ ============
 
 @client.on(events.NewMessage(outgoing=True, pattern=r'^\.help$'))
 async def cmd_help(event):
     await event.delete()
-    await client.send_message(event.chat_id, """🤖 **Команды бота:**
+    await client.send_message(event.chat_id, """🤖 **Команды агента:**
 
 👤 **Профиль:**
 `.имя Новое Имя` — сменить имя
 `.био Текст` — сменить bio
-`.фото` — ответь на фото чтобы поставить аватарку
+`.фото` — поставить фото (ответь на фото)
 `.копировать` — скопировать чужой профиль
 `.восстановить` — вернуть свой профиль
 `.я` — информация о себе
 
-🎮 **Игры:**
-`.игра` — угадай число (1-100)
-`.г <число>` — сделать попытку
-`.кубик` — бросить кубик
-`.монета` — орёл или решка
-`.шар вопрос` — магический шар
+🚫 **Стоп-лист:**
+`.стоп` — бот не отвечает этому человеку
+`.старт` — снять блокировку
+`.стоплист` — список заблокированных
+
+📋 **Сводка:**
+`.сводка` — пропущенные сообщения
+`.очистить` — очистить сводку
 
 🌦️ **Погода:**
 `.погода Ташкент` — погода в городе
 
 📊 **Статистика:**
-`.стат` — кто чаще пишет в этом чате
+`.стат` — кто чаще пишет
 
 ⏰ **Напоминания:**
-`.напомни 10 текст` — напомнить через N минут
+`.напомни 10 текст` — через N минут
 
 🔒 **Режим:**
-`.невидимка` — включить невидимку (бот отвечает всем)
+`.невидимка` — включить невидимку
 `.видимка` — выключить невидимку
-`.настроение злой` — сменить настроение бота
-`.настроение весёлый` — весёлый режим
-`.настроение грустный` — грустный режим
-`.настроение норм` — обычный режим
+`.настроение злой/весёлый/грустный/норм`
 
-ℹ️ **Другое:**
-`.ping` — проверить бота
-`.help` — это меню
+🎮 **Игры (для всех):**
+`.шар вопрос` — магический шар
+`.игра` — угадай число
+`.г <число>` — попытка
+`.кубик` — кубик
+`.монета` — орёл/решка
+
+ℹ️ `.ping` — статус бота
 """)
 
 # ============ ПРОФИЛЬ ============
@@ -207,36 +205,36 @@ async def cmd_help(event):
 @client.on(events.NewMessage(outgoing=True, pattern=r'^\.имя (.+)$'))
 async def cmd_name(event):
     await event.delete()
-    name_parts = event.pattern_match.group(1).split(None, 1)
-    first = name_parts[0]
-    last = name_parts[1] if len(name_parts) > 1 else ""
+    parts = event.pattern_match.group(1).split(None, 1)
+    first = parts[0]
+    last = parts[1] if len(parts) > 1 else ""
     await client(UpdateProfileRequest(first_name=first, last_name=last))
-    await client.send_message(event.chat_id, f"✅ Имя изменено на **{first} {last}**")
+    await client.send_message(event.chat_id, f"✅ Имя: **{first} {last}**")
 
 @client.on(events.NewMessage(outgoing=True, pattern=r'^\.био (.+)$'))
 async def cmd_bio(event):
     await event.delete()
     bio = event.pattern_match.group(1)
     await client(UpdateProfileRequest(about=bio))
-    await client.send_message(event.chat_id, f"✅ Bio изменено на:\n_{bio}_")
+    await client.send_message(event.chat_id, f"✅ Bio: _{bio}_")
 
 @client.on(events.NewMessage(outgoing=True, pattern=r'^\.фото$'))
 async def cmd_photo(event):
     await event.delete()
     reply = await event.get_reply_message()
     if not reply or not reply.photo:
-        await client.send_message(event.chat_id, "❌ Ответь на фото командой .фото")
+        await client.send_message(event.chat_id, "❌ Ответь на фото")
         return
     try:
         file = await reply.download_media(bytes)
         uploaded = await client.upload_file(file, file_name="photo.jpg")
         await client(PhotoUpload(file=uploaded))
-        await client.send_message(event.chat_id, "✅ Фото профиля обновлено!")
+        await client.send_message(event.chat_id, "✅ Фото обновлено!")
     except Exception as e:
         await client.send_message(event.chat_id, f"❌ Ошибка: {e}")
 
 @client.on(events.NewMessage(outgoing=True, pattern=r'^\.копировать$'))
-async def cmd_copy_profile(event):
+async def cmd_copy(event):
     await event.delete()
     reply = await event.get_reply_message()
     if not reply:
@@ -251,29 +249,24 @@ async def cmd_copy_profile(event):
 
         user = await reply.get_sender()
         user_full = await client(GetFullUserRequest(user.id))
-
         await client(UpdateProfileRequest(
             first_name=getattr(user, 'first_name', '') or "",
             last_name=getattr(user, 'last_name', '') or ""
         ))
-
-        user_about = getattr(user_full.full_user, 'about', '') or ""
-        if user_about:
-            await client(UpdateProfileRequest(about=user_about))
-
+        about = getattr(user_full.full_user, 'about', '') or ""
+        if about:
+            await client(UpdateProfileRequest(about=about))
         photos = await client.get_profile_photos(user.id)
         if photos:
             file = await client.download_media(photos[0], bytes)
             uploaded = await client.upload_file(file, file_name="photo.jpg")
             await client(PhotoUpload(file=uploaded))
-            await client.send_message(event.chat_id, f"✅ Скопировал профиль **{user.first_name}**!\nДля возврата: `.восстановить`")
-        else:
-            await client.send_message(event.chat_id, f"✅ Скопировал профиль **{user.first_name}**!\nДля возврата: `.восстановить`")
+        await client.send_message(event.chat_id, f"✅ Скопировал **{user.first_name}**!\nВернуть: `.восстановить`")
     except Exception as e:
         await client.send_message(event.chat_id, f"❌ Ошибка: {e}")
 
 @client.on(events.NewMessage(outgoing=True, pattern=r'^\.восстановить$'))
-async def cmd_restore_profile(event):
+async def cmd_restore(event):
     await event.delete()
     if not original_profile:
         await client.send_message(event.chat_id, "❌ Нечего восстанавливать")
@@ -284,7 +277,7 @@ async def cmd_restore_profile(event):
             last_name=original_profile.get("last_name", ""),
             about=original_profile.get("about", "")
         ))
-        await client.send_message(event.chat_id, "✅ Профиль восстановлен!\n⚠️ Фото восстанови через `.фото`")
+        await client.send_message(event.chat_id, "✅ Профиль восстановлен!\n⚠️ Фото — через `.фото`")
     except Exception as e:
         await client.send_message(event.chat_id, f"❌ Ошибка: {e}")
 
@@ -295,13 +288,12 @@ async def cmd_me(event):
         me = await client.get_me()
         me_full = await client(GetFullUserRequest(me.id))
         bio = getattr(me_full.full_user, 'about', '') or 'нет'
-        await client.send_message(event.chat_id, f"""👤 **Информация о тебе:**
-
+        await client.send_message(event.chat_id, f"""👤 **Кристофер:**
 🔹 Имя: {me.first_name or ''} {me.last_name or ''}
 🔹 Username: @{me.username or 'нет'}
 🔹 ID: `{me.id}`
 🔹 Bio: {bio}
-🔹 Телефон: `{me.phone or 'скрыт'}`
+🔹 Работа: Uzum, Ташкент
 """)
     except Exception as e:
         await client.send_message(event.chat_id, f"❌ Ошибка: {e}")
@@ -311,7 +303,106 @@ async def cmd_ping(event):
     await event.delete()
     mood_labels = {"normal": "😐 Норм", "evil": "😠 Злой", "happy": "😄 Весёлый", "sad": "😢 Грустный"}
     invis = "🔒 Вкл" if invisible_mode else "🔓 Выкл"
-    await client.send_message(event.chat_id, f"🟢 Бот работает!\n🎭 Настроение: {mood_labels.get(bot_mood, 'Норм')}\n👁 Невидимка: {invis}")
+    memory_count = sum(len(v) for v in conversation_memory.values())
+    await client.send_message(event.chat_id, f"""🟢 Агент активен!
+🎭 Настроение: {mood_labels.get(bot_mood, 'Норм')}
+👁 Невидимка: {invis}
+🧠 Диалогов в памяти: {len(conversation_memory)}
+💬 Сообщений помню: {memory_count}
+🚫 В стоп-листе: {len(blocked_users)}
+📋 Пропущено: {sum(len(v) for v in missed_messages.values())}
+""")
+
+# ============ СТОП-ЛИСТ ============
+
+@client.on(events.NewMessage(outgoing=True, pattern=r'^\.стоп$'))
+async def cmd_block(event):
+    await event.delete()
+    reply = await event.get_reply_message()
+    if not reply:
+        await client.send_message(event.chat_id, "❌ Ответь на сообщение человека")
+        return
+    user = await reply.get_sender()
+    blocked_users.add(user.id)
+    name = getattr(user, 'first_name', 'Пользователь')
+    await client.send_message(event.chat_id, f"🚫 **{name}** в стоп-листе\nСнять: `.старт`")
+
+@client.on(events.NewMessage(outgoing=True, pattern=r'^\.старт$'))
+async def cmd_unblock(event):
+    await event.delete()
+    reply = await event.get_reply_message()
+    if not reply:
+        await client.send_message(event.chat_id, "❌ Ответь на сообщение человека")
+        return
+    user = await reply.get_sender()
+    blocked_users.discard(user.id)
+    name = getattr(user, 'first_name', 'Пользователь')
+    await client.send_message(event.chat_id, f"✅ **{name}** убран из стоп-листа")
+
+@client.on(events.NewMessage(outgoing=True, pattern=r'^\.стоплист$'))
+async def cmd_blocklist(event):
+    await event.delete()
+    if not blocked_users:
+        await client.send_message(event.chat_id, "📋 Стоп-лист пустой")
+        return
+    text = "🚫 **Стоп-лист:**\n\n"
+    for uid in blocked_users:
+        try:
+            user = await client.get_entity(uid)
+            name = getattr(user, 'first_name', 'Неизвестный')
+            username = f"@{user.username}" if getattr(user, 'username', None) else ""
+            text += f"• {name} {username}\n"
+        except Exception:
+            text += f"• ID: {uid}\n"
+    await client.send_message(event.chat_id, text)
+
+# ============ СВОДКА ============
+
+@client.on(events.NewMessage(outgoing=True, pattern=r'^\.сводка$'))
+async def cmd_summary(event):
+    await event.delete()
+    if not any(missed_messages.values()):
+        await client.send_message(event.chat_id, "📋 Пропущенных сообщений нет")
+        return
+
+    text = "📋 **Пропущенные сообщения:**\n\n"
+    for user_id, messages in missed_messages.items():
+        if not messages:
+            continue
+        try:
+            user = await client.get_entity(user_id)
+            name = getattr(user, 'first_name', 'Неизвестный')
+            username = f"@{user.username}" if getattr(user, 'username', None) else ""
+            text += f"👤 **{name}** {username} ({len(messages)} сообщ.):\n"
+            for m in messages[-3:]:
+                text += f"  • _{m[:50]}{'...' if len(m) > 50 else ''}_\n"
+            text += "\n"
+        except Exception:
+            pass
+
+    # ИИ делает краткую сводку
+    try:
+        all_msgs = []
+        for uid, msgs in missed_messages.items():
+            all_msgs.extend(msgs)
+        if all_msgs:
+            summary = ai.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=150,
+                system="Сделай краткую сводку пропущенных сообщений в 2-3 предложениях. На русском, коротко.",
+                messages=[{"role": "user", "content": "\n".join(all_msgs)}]
+            )
+            text += f"\n🧠 **Итог:** {summary.content[0].text}"
+    except Exception:
+        pass
+
+    await client.send_message(event.chat_id, text)
+
+@client.on(events.NewMessage(outgoing=True, pattern=r'^\.очистить$'))
+async def cmd_clear(event):
+    await event.delete()
+    missed_messages.clear()
+    await client.send_message(event.chat_id, "✅ Сводка очищена")
 
 # ============ ПОГОДА ============
 
@@ -320,28 +411,22 @@ async def cmd_weather(event):
     await event.delete()
     city = event.pattern_match.group(1)
     try:
-        import urllib.request
-        import json
         url = f"https://wttr.in/{urllib.parse.quote(city)}?format=j1&lang=ru"
         with urllib.request.urlopen(url, timeout=5) as r:
             data = json.loads(r.read())
-        current = data["current_condition"][0]
-        temp = current["temp_C"]
-        feels = current["FeelsLikeC"]
-        desc = current["lang_ru"][0]["value"]
-        wind = current["windspeedKmph"]
-        humidity = current["humidity"]
+        cur = data["current_condition"][0]
         await client.send_message(event.chat_id, f"""🌦️ **Погода в {city}:**
-
-🌡️ Температура: **{temp}°C** (ощущается {feels}°C)
-☁️ {desc}
-💨 Ветер: {wind} км/ч
-💧 Влажность: {humidity}%
+🌡️ {cur['temp_C']}°C (ощущается {cur['FeelsLikeC']}°C)
+☁️ {cur['lang_ru'][0]['value']}
+💨 Ветер: {cur['windspeedKmph']} км/ч
+💧 Влажность: {cur['humidity']}%
 """)
-    except Exception as e:
-        await client.send_message(event.chat_id, f"❌ Не удалось получить погоду для **{city}**\nПроверь название города")
+    except Exception:
+        await client.send_message(event.chat_id, f"❌ Не удалось получить погоду для **{city}**")
 
 # ============ СТАТИСТИКА ============
+
+stats = defaultdict(lambda: defaultdict(int))
 
 @client.on(events.NewMessage(incoming=True))
 async def track_messages(event):
@@ -353,7 +438,7 @@ async def cmd_stats(event):
     await event.delete()
     chat_id = event.chat_id
     if not stats[chat_id]:
-        await client.send_message(chat_id, "📊 Статистика пока пустая — никто не писал с момента запуска бота")
+        await client.send_message(chat_id, "📊 Статистика пустая")
         return
     sorted_users = sorted(stats[chat_id].items(), key=lambda x: x[1], reverse=True)[:10]
     text = "📊 **Кто чаще пишет:**\n\n"
@@ -366,7 +451,7 @@ async def cmd_stats(event):
             medal = medals[i] if i < 3 else f"{i+1}."
             text += f"{medal} {name} {username} — **{count}** сообщ.\n"
         except Exception:
-            text += f"{i+1}. Неизвестный — **{count}** сообщ.\n"
+            pass
     await client.send_message(chat_id, text)
 
 # ============ НАПОМИНАНИЯ ============
@@ -378,11 +463,9 @@ async def cmd_remind(event):
     text = event.pattern_match.group(2)
     chat_id = event.chat_id
     await client.send_message(chat_id, f"⏰ Напомню через **{minutes} мин:** _{text}_")
-
     async def remind():
         await asyncio.sleep(minutes * 60)
         await client.send_message(chat_id, f"⏰ **Напоминание!**\n\n{text}")
-
     asyncio.create_task(remind())
 
 # ============ НЕВИДИМКА ============
@@ -396,14 +479,14 @@ async def cmd_invisible_on(event):
         await client(UpdateStatusRequest(offline=True))
     except Exception:
         pass
-    await client.send_message(event.chat_id, "🔒 Невидимка **включена** — бот будет отвечать за тебя\nВыключить: `.видимка`")
+    await client.send_message(event.chat_id, "🔒 Невидимка **включена**\nВыключить: `.видимка`")
 
 @client.on(events.NewMessage(outgoing=True, pattern=r'^\.видимка$'))
 async def cmd_invisible_off(event):
     global invisible_mode
     await event.delete()
     invisible_mode = False
-    await client.send_message(event.chat_id, "🔓 Невидимка **выключена** — теперь ты онлайн")
+    await client.send_message(event.chat_id, "🔓 Невидимка **выключена**")
 
 # ============ НАСТРОЕНИЕ ============
 
@@ -413,23 +496,15 @@ async def cmd_mood(event):
     await event.delete()
     mood_input = event.pattern_match.group(1).lower().strip()
     moods = {
-        "злой": "evil",
-        "evil": "evil",
-        "весёлый": "happy",
-        "веселый": "happy",
-        "happy": "happy",
-        "грустный": "sad",
-        "sad": "sad",
-        "норм": "normal",
-        "normal": "normal",
-        "обычный": "normal",
+        "злой": "evil", "весёлый": "happy", "веселый": "happy",
+        "грустный": "sad", "норм": "normal", "обычный": "normal",
     }
     if mood_input not in moods:
-        await client.send_message(event.chat_id, "❌ Доступные настроения: `злой`, `весёлый`, `грустный`, `норм`")
+        await client.send_message(event.chat_id, "❌ Доступные: `злой`, `весёлый`, `грустный`, `норм`")
         return
     bot_mood = moods[mood_input]
     labels = {"evil": "😠 Злой", "happy": "😄 Весёлый", "sad": "😢 Грустный", "normal": "😐 Обычный"}
-    await client.send_message(event.chat_id, f"🎭 Настроение бота: **{labels[bot_mood]}**")
+    await client.send_message(event.chat_id, f"🎭 Настроение: **{labels[bot_mood]}**")
 
 # ============ ИГРЫ ============
 
@@ -437,33 +512,31 @@ async def cmd_mood(event):
 async def cmd_dice(event):
     await event.delete()
     n = random.randint(1, 6)
-    faces = {1:"1️⃣", 2:"2️⃣", 3:"3️⃣", 4:"4️⃣", 5:"5️⃣", 6:"6️⃣"}
+    faces = {1:"1️⃣",2:"2️⃣",3:"3️⃣",4:"4️⃣",5:"5️⃣",6:"6️⃣"}
     await client.send_message(event.chat_id, f"🎲 Выпало: {faces[n]} ({n})")
 
 @client.on(events.NewMessage(outgoing=True, pattern=r'^\.монета$'))
 async def cmd_coin(event):
     await event.delete()
-    result = random.choice(["👑 Орёл!", "🪙 Решка!"])
-    await client.send_message(event.chat_id, result)
+    await client.send_message(event.chat_id, random.choice(["👑 Орёл!", "🪙 Решка!"]))
 
 @client.on(events.NewMessage(outgoing=True, pattern=r'^\.шар (.+)$'))
 async def cmd_ball_out(event):
     await event.delete()
-    question = event.pattern_match.group(1)
-    await client.send_message(event.chat_id, f"🎱 Вопрос: _{question}_\n\n{random.choice(BALL_ANSWERS)}")
+    q = event.pattern_match.group(1)
+    await client.send_message(event.chat_id, f"🎱 _{q}_\n\n{random.choice(BALL_ANSWERS)}")
 
 @client.on(events.NewMessage(incoming=True, pattern=r'^\.шар (.+)$'))
 async def cmd_ball_in(event):
-    question = event.pattern_match.group(1)
+    q = event.pattern_match.group(1)
     await asyncio.sleep(random.uniform(0.5, 1.5))
-    await event.reply(f"🎱 Вопрос: _{question}_\n\n{random.choice(BALL_ANSWERS)}")
+    await event.reply(f"🎱 _{q}_\n\n{random.choice(BALL_ANSWERS)}")
 
 @client.on(events.NewMessage(outgoing=True, pattern=r'^\.игра$'))
 async def cmd_game_start(event):
     await event.delete()
-    number = random.randint(1, 100)
-    games[event.chat_id] = {"number": number, "attempts": 0}
-    await client.send_message(event.chat_id, "🎮 **Угадай число от 1 до 100!**\nПиши `.г <число>`\nНапример: `.г 50`")
+    games[event.chat_id] = {"number": random.randint(1, 100), "attempts": 0}
+    await client.send_message(event.chat_id, "🎮 **Угадай число от 1 до 100!**\nПиши `.г <число>`")
 
 @client.on(events.NewMessage(pattern=r'^\.г (\d+)$'))
 async def cmd_game_guess(event):
@@ -472,7 +545,7 @@ async def cmd_game_guess(event):
     chat_id = event.chat_id
     if chat_id not in games:
         if event.out:
-            await client.send_message(chat_id, "❌ Сначала начни игру: `.игра`")
+            await client.send_message(chat_id, "❌ Начни игру: `.игра`")
         return
     guess = int(event.pattern_match.group(1))
     games[chat_id]["attempts"] += 1
@@ -486,9 +559,9 @@ async def cmd_game_guess(event):
         await event.reply(f"📉 Меньше, {name}! (попытка {attempts})")
     else:
         del games[chat_id]
-        await event.reply(f"🎉 {name} угадал! Число было **{number}**\nПопыток: **{attempts}**")
+        await event.reply(f"🎉 {name} угадал! Было **{number}**, попыток: **{attempts}**")
 
-# ============ АВТООТВЕТЫ ============
+# ============ УМНЫЙ ИИ-АГЕНТ ============
 
 @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
 async def handler_private(event):
@@ -498,32 +571,46 @@ async def handler_private(event):
         return
     if girlfriend_id is not None and event.sender_id == girlfriend_id:
         return
+    if event.sender_id in blocked_users:
+        return
     if await is_online():
         return
 
+    user_id = event.sender_id
+
+    # Сохраняем в сводку пропущенных
+    missed_messages[user_id].append(event.raw_text)
+
+    # Анимация
     animation = random.choice(ANIMATIONS)
     msg = await event.respond(animation[0])
     for frame in animation[1:]:
         await asyncio.sleep(0.4)
         await msg.edit(frame)
 
-    time_of_day, auto_reply = get_time_mood()
+    # Добавляем сообщение в память
+    add_to_memory(user_id, "user", event.raw_text)
 
-    if random.random() < 0.25:
-        await asyncio.sleep(0.3)
-        await msg.edit(auto_reply)
-        return
+    # Строим историю для ИИ
+    history = get_memory(user_id)
 
     try:
         response = ai.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=100,
-            system=get_system_prompt(time_of_day),
-            messages=[{"role": "user", "content": event.raw_text}]
+            max_tokens=150,
+            system=build_system_prompt(),
+            messages=history
         )
-        await msg.edit(response.content[0].text)
+        reply_text = response.content[0].text
+
+        # Сохраняем ответ в память
+        add_to_memory(user_id, "assistant", reply_text)
+
+        await msg.edit(reply_text)
+
     except Exception:
-        await msg.edit(auto_reply)
+        fallback = "Занят щас, позже напишу"
+        await msg.edit(fallback)
 
 @client.on(events.NewMessage(incoming=True, func=lambda e: not e.is_private))
 async def handler_group(event):
@@ -535,11 +622,7 @@ async def handler_group(event):
         return
 
     me = await client.get_me()
-    mentioned = False
-    if event.mentioned:
-        mentioned = True
-    elif me.username and f"@{me.username}" in event.raw_text:
-        mentioned = True
+    mentioned = event.mentioned or (me.username and f"@{me.username}" in event.raw_text)
     if not mentioned:
         return
 
@@ -549,7 +632,7 @@ async def handler_group(event):
         response = ai.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=60,
-            system=get_system_prompt(None, is_group=True),
+            system=build_system_prompt(is_group=True),
             messages=[{"role": "user", "content": event.raw_text}]
         )
         await event.reply(response.content[0].text)
@@ -568,8 +651,7 @@ async def main():
         except Exception as e:
             print(f"Девушка не найдена ❌ {e}")
 
-    print("Бот запущен! ✅")
+    print("Агент запущен! ✅")
     await client.run_until_disconnected()
 
-import urllib.parse
 asyncio.run(main())
